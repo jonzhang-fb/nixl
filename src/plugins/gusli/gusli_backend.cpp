@@ -17,6 +17,8 @@
 #include "gusli_backend.h"
 #include "common/nixl_log.h"
 #include <absl/strings/str_format.h>
+#include <functional>
+#include <stdexcept>
 #define __LOG_ERR(format, ...)                                                                    \
     do {                                                                                          \
         NIXL_ERROR << absl::StrFormat(                                                            \
@@ -68,11 +70,23 @@ public:
     nixl_mem_t memType;
 
     nixlGusliMemReq(const nixlBlobDesc &mem, nixl_mem_t mem_type) : nixlBackendMD(true) {
-        bdev.set_from(mem.devId);
+        static constexpr const char kGusliBdevMetaPfx[] = "gusli_bdev=";
+        if (mem.metaInfo.rfind(kGusliBdevMetaPfx, 0) == 0)
+            bdev.set_from(mem.metaInfo.c_str() + sizeof(kGusliBdevMetaPfx) - 1);
+        else
+            bdev.set_from(mem.devId);
         devId = mem.devId;
         memType = mem_type;
     }
 };
+
+[[nodiscard]] int32_t
+gidFromXferLocal(const gusli::global_clnt_context *lib, const nixlMetaDesc &local) {
+    if (!lib || !local.metadataP)
+        throw std::runtime_error("GUSLI xfer: missing library or local.metadataP");
+    const auto *md = static_cast<const nixlGusliMemReq *>(local.metadataP);
+    return lib->bdev_get_descriptor(md->bdev);
+}
 
 nixl_status_t
 verifyRequestParams(const nixl_xfer_op_t &op,
@@ -321,14 +335,14 @@ public:
                                  bool hasSglMem,
                                  const nixl_meta_dlist_t &local,
                                  const nixl_meta_dlist_t &remote,
-                                 std::function<int32_t(uint64_t)> convertIdFunc)
+                                 const std::function<int32_t(const nixlMetaDesc &)> &gidForLocal)
         : nixlGusliBackendReqHbase(nixl_op) {
         child.reserve(nSubIOs);
         const unsigned num_ranges = remote.descCount();
         unsigned i = (hasSglMem ? 1 : 0); // If supplied sgl, can't use it for now, just ignore it
         __LOG_IO(this, "_Compound IO, has_sgl=%d, nSubIOs=%u", hasSglMem, (num_ranges - i));
         for (; i < num_ranges; i++)
-            child.emplace_back(nixl_op, convertIdFunc(remote[i].devId), local[i], remote[i]);
+            child.emplace_back(nixl_op, gidForLocal(local[i]), local[i], remote[i]);
     }
 
     ~nixlGusliBackendReqHCompound() override = default;
@@ -380,13 +394,15 @@ nixlGusliEngine::prepXfer(const nixl_xfer_op_t &op,
     nixl_status_t verifyRv = verifyRequestParams(op, local, remote);
     if (verifyRv != NIXL_SUCCESS) return verifyRv;
 
-    const int32_t gid = getGidOfBDev(remote[0].devId); // First bdev for IO
     const unsigned num_ranges = remote.descCount();
     const bool is_single_range_io = (num_ranges == 1);
     const bool has_sgl_mem =
         (opt_args && (opt_args->customParam.find("-sgl") != std::string::npos));
     const bool entire_io_1_bdev = isEntireIOto1Bdev(remote);
     const bool can_use_multi_range_optimization = (entire_io_1_bdev && has_sgl_mem);
+    const nixlMetaDesc &local_for_gid =
+        (has_sgl_mem && local.descCount() > 1) ? local[1] : local[0];
+    const int32_t gid = gidFromXferLocal(lib_.get(), local_for_gid);
     std::unique_ptr<nixlGusliBackendReqHbase> req;
     try {
         if (is_single_range_io) {
@@ -395,8 +411,8 @@ nixlGusliEngine::prepXfer(const nixl_xfer_op_t &op,
             req = std::make_unique<nixlGusliBackendReqHSingleBdev>(op, gid, local, remote);
         } else {
             req = std::make_unique<nixlGusliBackendReqHCompound>(
-                op, num_ranges, has_sgl_mem, local, remote, [this](uint64_t devId) {
-                    return this->getGidOfBDev(devId);
+                op, num_ranges, has_sgl_mem, local, remote, [this](const nixlMetaDesc &lm) {
+                    return gidFromXferLocal(this->lib_.get(), lm);
                 });
         }
         handle = (nixlBackendReqH *)req.release();

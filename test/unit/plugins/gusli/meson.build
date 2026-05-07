@@ -13,9 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+nixl_gusli_test_inc = [nixl_inc_dirs, utils_inc_dirs]
+nixl_gusli_test_deps = [nixl_dep, nixl_infra, absl_log_dep, nixl_test_utils_dep]
+if gusli_prefix_resolved != ''
+    nixl_gusli_test_inc += include_directories(join_paths(gusli_prefix_resolved, 'include'), is_system: true)
+    nixl_gusli_test_deps += declare_dependency(
+        link_args: ['-L' + join_paths(gusli_prefix_resolved, 'lib'), '-lgusli_clnt'],
+    )
+endif
+
 nixl_gusli_app = executable('nixl_gusli_test', 'nixl_gusli_test.cpp',
-                          dependencies: [nixl_dep, nixl_infra, absl_log_dep, nixl_test_utils_dep],
-                          include_directories: [nixl_inc_dirs, utils_inc_dirs],
+                          dependencies: nixl_gusli_test_deps,
+                          include_directories: nixl_gusli_test_inc,
                           install: true)
 
 # Register the test with the test suite

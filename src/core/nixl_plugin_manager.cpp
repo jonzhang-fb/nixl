@@ -274,21 +274,65 @@ nixlPluginManager::discoverPluginsFromList(const std::string &filename) {
 }
 
 namespace {
-std::string
-getPluginDir() {
-    // Environment variable takes precedence
+bool
+dir_contains_backend_plugin_so(const std::filesystem::path &dirpath) {
+    std::error_code ec;
+    for (const auto &entry : std::filesystem::directory_iterator(dirpath, ec)) {
+        if (ec) {
+            break;
+        }
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        static const char prefix[] = "libplugin_";
+        static const char suffix[] = ".so";
+        if (name.size() > sizeof(prefix) - 1 + sizeof(suffix) - 1 &&
+            name.compare(0, sizeof(prefix) - 1, prefix) == 0 &&
+            name.compare(name.size() - (sizeof(suffix) - 1), sizeof(suffix) - 1, suffix) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void
+collectDefaultPluginDirs(std::vector<std::filesystem::path> &out) {
+    // Environment variable takes precedence (only this directory is searched).
     if (const auto plugin_dir = nixl::config::getValueOptional<std::string>("NIXL_PLUGIN_DIR")) {
-        return *plugin_dir;
+        if (!plugin_dir->empty()) {
+            out.emplace_back(*plugin_dir);
+        }
+        return;
     }
 
-    // By default, use the plugin directory relative to the binary
-    Dl_info info;
-    int ok = dladdr(reinterpret_cast<void *>(&getPluginDir), &info);
-    if (!ok) {
+    // Resolve directory containing libnixl.so (works for shared libnixl; not the test exe).
+    Dl_info info{};
+    int ok = dladdr(reinterpret_cast<void *>(&nixlPluginManager::getInstance), &info);
+    if (!ok || info.dli_fname == nullptr) {
         NIXL_ERROR << "Failed to get plugin directory from dladdr";
-        return "";
+        return;
     }
-    return (std::filesystem::path(info.dli_fname).parent_path() / "plugins").string();
+    const std::filesystem::path libnixl = info.dli_fname;
+    const std::filesystem::path libdir = libnixl.parent_path();
+
+    // Installed layout: $prefix/lib/libnixl.so -> $prefix/lib/plugins/libplugin_*.so
+    out.push_back(libdir / "plugins");
+
+    // Meson in-tree build: .../src/core/libnixl.so -> .../src/plugins/<backend>/libplugin_*.so
+    const std::filesystem::path meson_plugin_root = libdir.parent_path() / "plugins";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(meson_plugin_root, ec) || ec) {
+        return;
+    }
+    for (const auto &entry : std::filesystem::directory_iterator(meson_plugin_root, ec)) {
+        if (ec) {
+            break;
+        }
+        if (entry.is_directory() && dir_contains_backend_plugin_so(entry.path())) {
+            out.push_back(entry.path());
+        }
+    }
 }
 } // namespace
 
@@ -303,11 +347,17 @@ nixlPluginManager::nixlPluginManager() {
     }
 #endif
 
-    std::string plugin_dir = getPluginDir();
-    if (!plugin_dir.empty()) {
+    std::vector<std::filesystem::path> default_dirs;
+    collectDefaultPluginDirs(default_dirs);
+    for (const auto &p : default_dirs) {
+        std::error_code ec;
+        if (!std::filesystem::is_directory(p, ec) || ec) {
+            continue;
+        }
+        const std::string plugin_dir = p.string();
         NIXL_DEBUG << "Loading plugins from: " << plugin_dir;
-        plugin_dirs_.insert(plugin_dirs_.begin(), plugin_dir);
-        discoverPluginsFromDir(plugin_dir);
+        plugin_dirs_.push_back(plugin_dir);
+        discoverPluginsFromDir(p);
     }
 
     registerBuiltinPlugins();

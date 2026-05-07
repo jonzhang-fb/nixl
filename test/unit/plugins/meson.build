@@ -88,9 +88,12 @@ if enabled_plugins.get('HF3FS')
     endif
 endif
 
-gusli_lib_path = '/usr/lib/'
 gusli_lib_file = 'gusli_clnt'
-gusli_lib_found = cc.find_library(gusli_lib_file, dirs: [gusli_lib_path], required: false)
+gusli_lib_dirs_tests = []
+if gusli_prefix_resolved != ''
+    gusli_lib_dirs_tests += [join_paths(gusli_prefix_resolved, 'lib')]
+endif
+gusli_lib_found = cc.find_library(gusli_lib_file, dirs: gusli_lib_dirs_tests, required: false)
 if enabled_plugins.get('GUSLI')
     if not gusli_lib_found.found() and is_explicit_enable
         error('GUSLI plugin tests requested but gusli_clnt library not found')

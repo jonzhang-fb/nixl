@@ -100,11 +100,5 @@ private:
     parseInitParams(const nixlBackendInitParams *nixl_init,
                     gusli::global_clnt_context::init_params &gusli_params);
 
-    [[nodiscard]] int32_t
-    getGidOfBDev(uint64_t devId) const {
-        gusli::backend_bdev_id bdev;
-        bdev.set_from(devId);
-        return lib_->bdev_get_descriptor(bdev);
-    }
 };
 #endif

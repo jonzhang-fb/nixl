@@ -16,6 +16,7 @@
  */
 #include <iostream> // std:cerr
 #include <iomanip> // std::setprecision
+#include <string>
 #include <unistd.h>
 #include <stdlib.h>
 #include <absl/strings/str_format.h>
@@ -27,6 +28,29 @@
 #define UUID_LOCAL_FILE_0 11 // Just some numbers
 #define UUID_K_DEV_ZERO_1 14
 #define UUID_NVME_DISK__0 27
+
+/** First 16 characters of Gusli SPDK example `srvr_bdevs_uuid` (see gusli/07examples/common.hpp). */
+static constexpr const char kNixlGusliSpdkDefaultBdevId[] = "8888spdk5555uuid";
+
+static const char *
+nixl_gusli_spdk_uds(void) {
+    return getenv("NIXL_GUSLI_SPDK_UDS");
+}
+
+static std::string
+nixl_gusli_spdk_bdev_meta(void) {
+    const char *id = getenv("NIXL_GUSLI_SPDK_BDEV");
+    if (id && id[0])
+        return std::string("gusli_bdev=") + id;
+    return std::string("gusli_bdev=") + kNixlGusliSpdkDefaultBdevId;
+}
+
+static void
+nixl_gusli_maybe_spdk_bdev_meta(nixlBlobDesc &d) {
+    const char *uds = nixl_gusli_spdk_uds();
+    if (uds && uds[0] && d.devId == UUID_LOCAL_FILE_0)
+        d.metaInfo = nixl_gusli_spdk_bdev_meta();
+}
 
 #define DEF_TEST_PHRASE "|NIXL bdev 32[b] GUSLI pattern |"
 #define DEF_TEST_PHRASE_LEN (sizeof(DEF_TEST_PHRASE) - 1) // -1 to exclude null terminator
@@ -132,7 +156,12 @@ private:
 
     static std::string
     center_str(const std::string &str) {
-        return std::string((line_width - str.length()) / 2, ' ') + str;
+        const size_t len = str.length();
+        const size_t lw = static_cast<size_t>(line_width);
+        if (len >= lw) {
+            return str; // Avoid size_t underflow in (lw - len) / 2 (throws std::length_error)
+        }
+        return std::string((lw - len) / 2, ' ') + str;
     }
 
     static std::string
@@ -240,16 +269,33 @@ public:
             conf.bdev_add(gsc(__stringify (UUID_NVME_DISK__0), gsc::bdev_type::DEV_BLK_KERNEL, "/dev/nvme0n1", "sec=0x07", 1, gsc::connect_how::EXCLUSIVE_RW));
             params["config_file"] = conf.get();
 #else
-        // Unsafe method: Just generate the config string
-        params["config_file"] = "# Config file\nversion=1\n" __stringify(
-            UUID_LOCAL_FILE_0) " F W N ./store0.bin sec=0x3\n" __stringify(UUID_K_DEV_ZERO_1) " K "
-                                                                                              "X N "
-                                                                                              "/dev"
-                                                                                              "/zer"
-                                                                                              "o   "
-                                                                                              " sec"
-                                                                                              "=0x7"
-                                                                                              "1\n";
+        const char *spdk_uds = nixl_gusli_spdk_uds();
+        if (spdk_uds && spdk_uds[0]) {
+            const char *bdev = getenv("NIXL_GUSLI_SPDK_BDEV");
+            const std::string bdev_id =
+                (bdev && bdev[0]) ? std::string(bdev) : std::string(kNixlGusliSpdkDefaultBdevId);
+            params["config_file"] =
+                absl::StrFormat("# Config file (remote Gusli SPDK bdev + local /dev/zero)\n"
+                                "version=1\n"
+                                "%s N W D %s sec=0x04\n"
+                                "%d K X N /dev/zero sec=0x71\n",
+                                bdev_id,
+                                spdk_uds,
+                                UUID_K_DEV_ZERO_1);
+        } else {
+            // Unsafe method: Just generate the config string
+            params["config_file"] =
+                "# Config file\nversion=1\n" __stringify(
+                    UUID_LOCAL_FILE_0) " F W N ./store0.bin sec=0x3\n" __stringify(UUID_K_DEV_ZERO_1)
+                                       " K "
+                                       "X N "
+                                       "/dev"
+                                       "/zer"
+                                       "o   "
+                                       " sec"
+                                       "=0x7"
+                                       "1\n";
+        }
 #endif
         params["max_num_simultaneous_requests"] = std::to_string(num_transfers);
         return params;
@@ -325,7 +371,10 @@ public:
         bdev_reg.addDesc(d);
         for (int i = 0; i < 2; i++) {
             dram_reg[0].devId = bdev_reg[0].devId = bdevs[i];
-            dram_reg[0].metaInfo = bdev_reg[0].metaInfo = absl::StrFormat("DummyMd%d", i);
+            if (nixl_gusli_spdk_uds() && nixl_gusli_spdk_uds()[0] && bdevs[i] == UUID_LOCAL_FILE_0)
+                dram_reg[0].metaInfo = bdev_reg[0].metaInfo = nixl_gusli_spdk_bdev_meta();
+            else
+                dram_reg[0].metaInfo = bdev_reg[0].metaInfo = absl::StrFormat("DummyMd%d", i);
             status = (do_reg ? agent.registerMem(dram_reg) : agent.deregisterMem(dram_reg));
             QUIT_ON_ERR(absl::StrFormat("Failed bdev=%u %eg=%s, rv=",
                                         bdevs[i],
@@ -411,7 +460,14 @@ public:
         out_log << absl::StrFormat("- Total data: %.2f[GB], 0x%lx[B]\n",
                                    float(n_total_mapped_bytes) / gb_size,
                                    get_total_mem_useage());
-        out_log << absl::StrFormat("- Backend: GUSLI, Direct IO enabled\n") << line_str;
+        out_log << absl::StrFormat("- Backend: GUSLI, Direct IO enabled\n");
+        if (nixl_gusli_spdk_uds() && nixl_gusli_spdk_uds()[0]) {
+            out_log << absl::StrFormat(
+                "- NIXL_GUSLI_SPDK_UDS=%s (remote SPDK Gusli); set NIXL_GUSLI_SPDK_BDEV if UUID "
+                "differs\n",
+                nixl_gusli_spdk_uds());
+        }
+        out_log << line_str;
 
         // Create GUSLI backend first - before allocating any resources
         nixlBackendH *n_backend = nullptr; // Backend gusli plugin
@@ -420,22 +476,17 @@ public:
         QUIT_ON_ERR("Backend Creation Failed: ", status);
 
         if (1) {
-            print_segment_title(phase_title("Failed Second plugin initialization"));
+            print_segment_title(phase_title(
+                "Second GUSLI backend (expect failure — Gusli client is process-wide singleton)"));
             nixlBackendH *_2nd_plugin = nullptr;
             nixlAgentConfig cfg2;
             cfg2.useProgThread = true;
             nixlAgent agent2("2nd_agent", cfg2);
-            bool init_exception_caught = false;
-            try {
-                status = agent2.createBackend("GUSLI", params, n_backend);
-            }
-            catch (const std::runtime_error &e) {
-                init_exception_caught = true;
-            }
-
-            nixl_exit_on_failure((_2nd_plugin == nullptr), "2nd plugin instance could be created");
-            nixl_exit_on_failure((init_exception_caught = true),
-                                 "2nd plugin creation exception not caught!");
+            status = agent2.createBackend("GUSLI", params, _2nd_plugin);
+            nixl_exit_on_failure(status != NIXL_SUCCESS,
+                                 "second GUSLI createBackend should fail (singleton client library)");
+            nixl_exit_on_failure(_2nd_plugin == nullptr,
+                                 "second backend handle must stay null when createBackend fails");
         }
 
         print_segment_title(
@@ -453,9 +504,11 @@ public:
             d.len = n_total_mapped_bytes; // Just for debug, register in 2 descriptos, can register
                                           // as 1 buffer as well
             d.addr = (uintptr_t)ptr;
+            nixl_gusli_maybe_spdk_bdev_meta(d);
             dram_reg.addDesc(d);
             d.len = sg_buf_size;
             d.addr = (uintptr_t)((size_t)ptr + n_total_mapped_bytes);
+            nixl_gusli_maybe_spdk_bdev_meta(d);
             dram_reg.addDesc(d);
             // Just for debug, register in 4 quarters, can register as 1 buffer as well
             d.len =
@@ -463,6 +516,7 @@ public:
                                           // memory. Not needed internally by the plugin
             for (int i = 0; i < 4; i++) {
                 d.addr = bdev_byte_offset + i * d.len;
+                nixl_gusli_maybe_spdk_bdev_meta(d);
                 bdev_reg.addDesc(d);
             }
             status = agent.registerMem(dram_reg);

@@ -366,6 +366,22 @@ nixl_gpu_inc_dirs = include_directories('src/api/gpu/ucx')
 plugins_inc_dirs = include_directories('src/plugins')
 utils_inc_dirs = include_directories('src/utils')
 
+# Gusli: resolve relative -Dgusli_prefix=... against the NIXL source tree so find_library works reliably.
+gusli_prefix_resolved = ''
+gusli_prefix_raw = get_option('gusli_prefix')
+if gusli_prefix_raw != ''
+    if fs.is_absolute(gusli_prefix_raw)
+        gusli_prefix_resolved = gusli_prefix_raw
+    else
+        gusli_prefix_resolved = join_paths(meson.project_source_root(), gusli_prefix_raw)
+    endif
+    rp = run_command('realpath', gusli_prefix_resolved, check: false)
+    if rp.returncode() == 0
+        gusli_prefix_resolved = rp.stdout().strip()
+    endif
+    message('Gusli prefix (resolved): ' + gusli_prefix_resolved)
+endif
+
 subdir('src')
 if get_option('build_tests') and get_option('buildtype') != 'release'
   subdir('test')

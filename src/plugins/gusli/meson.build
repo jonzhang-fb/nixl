@@ -15,21 +15,29 @@
 
 # Mandatory dependencies
 cpp_sources = ['gusli_plugin.cpp', 'gusli_backend.cpp', 'gusli_backend.h']
+compile_defs = []
+compile_flags = []
+gusli_plugin_inc_list = [nixl_inc_dirs, utils_inc_dirs]
+gusli_link_args = ['-l' + gusli_lib_file]
+if gusli_prefix_resolved != ''
+    gusli_plugin_inc_list += include_directories(join_paths(gusli_prefix_resolved, 'include'), is_system: true)
+    gusli_link_args = ['-L' + join_paths(gusli_prefix_resolved, 'lib'), '-l' + gusli_lib_file]
+endif
 gusli_deps = [ nixl_infra,
-               declare_dependency(link_args : ['-l' + gusli_lib_file]),
+               declare_dependency(link_args: gusli_link_args),
                absl_log_dep]
 
 if 'GUSLI' in static_plugins
   gusli_backend_lib = static_library('GUSLI', cpp_sources,
         dependencies: gusli_deps,
-        include_directories: [nixl_inc_dirs, utils_inc_dirs],
+        include_directories: gusli_plugin_inc_list,
         install: false,
         cpp_args: compile_defs + compile_flags,
         name_prefix: 'libplugin_')  # Custom prefix for plugin libraries
 else
   gusli_backend_lib = shared_library('GUSLI', cpp_sources,
         dependencies: gusli_deps,
-        include_directories: [nixl_inc_dirs, utils_inc_dirs],
+        include_directories: gusli_plugin_inc_list,
         install: true,
         cpp_args: compile_defs + ['-fPIC'],
         name_prefix: 'libplugin_',  # Custom prefix for plugin libraries
