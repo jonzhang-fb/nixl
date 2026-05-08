@@ -18,6 +18,7 @@
 #include "common/nixl_log.h"
 #include <absl/strings/str_format.h>
 #include <functional>
+#include <sched.h>
 #include <stdexcept>
 #define __LOG_ERR(format, ...)                                                                    \
     do {                                                                                          \
@@ -319,6 +320,12 @@ public:
         return getCompStatus();
     }
 
+    /** Must run after submit_io + poll complete so Gusli drops this IO from in_air (detach executor). */
+    void
+    gusliIoReleaseAfterComplete(void) noexcept {
+        io.done();
+    }
+
 private:
     gusli::io_request io; // gusli executor of 1 io
 
@@ -349,11 +356,30 @@ public:
 
     [[nodiscard]] nixl_status_t
     exec(void) override {
+        // Submitting all sub-IOs at once exceeds Gusli in_air / ring limits (E_THROTTLE_RETRY_LATER
+        // → NIXL_ERR_NOT_ALLOWED) when descriptor count ≫ max_num_simultaneous_requests.
+        // Run sub-requests strictly one-after-another so each completes before the next starts.
+        // After each sub finishes, call io.done() so Gusli removes it from in_air; otherwise slots
+        // stay reserved until ~SingleBdev (compound end) and insert() throttles after num_max_inflight_io.
         pollableAsyncRV = gusli::io_error_codes::E_IN_TRANSFER;
-        __LOG_IO(this, "start, nSubIOs=%zu", child.size());
-        for (auto &sub : child)
-            (void)sub.exec(); // We know that return value is in progress
-        return NIXL_IN_PROG;
+        __LOG_IO(this, "start, nSubIOs=%zu (sequential for in-flight limits)", child.size());
+        for (auto &sub : child) {
+            (void)sub.exec();
+            nixl_status_t st;
+            do {
+                st = sub.pollStatus();
+                if (st == NIXL_IN_PROG) {
+                    sched_yield();
+                }
+            } while (st == NIXL_IN_PROG);
+            pollableAsyncRV = sub.pollableAsyncRV;
+            sub.gusliIoReleaseAfterComplete();
+            if (st != NIXL_SUCCESS) {
+                return st;
+            }
+        }
+        pollableAsyncRV = gusli::io_error_codes::E_OK;
+        return NIXL_SUCCESS;
     }
 
     [[nodiscard]] nixl_status_t

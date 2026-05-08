@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #if HAVE_CUDA
 #include <cuda.h>
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <iomanip>
 #include <sstream>
+#include <unordered_map>
 #include "utils/neuron.h"
 #include "utils/utils.h"
 #include <unistd.h>
@@ -871,6 +873,12 @@ xferBenchNixlWorker::allocateMemory(int num_threads) {
                 basic_desc = initBasicDescBlk(
                     buffer_size, gusli_devices[i].device_id, gusli_devices[i].dev_offset);
                 if (basic_desc) {
+                    // SPDK Gusli server uses string bdev UUIDs (e.g. 8888spdk5555uuid) while
+                    // device_list uses numeric ids; NIXL GUSLI plugin honors gusli_bdev=… in meta.
+                    if (const char *gbdev = std::getenv("NIXL_GUSLI_SPDK_BDEV");
+                        gbdev && gbdev[0] && gusli_devices[i].device_type == 'N') {
+                        basic_desc->metaInfo = std::string("gusli_bdev=") + gbdev;
+                    }
                     iov_list.push_back(basic_desc.value());
                 }
             }
@@ -1115,9 +1123,10 @@ xferBenchNixlWorker::exchangeIOV(const std::vector<std::vector<xferBenchIOV>> &l
     if (xferBenchConfig::isStorageBackend()) {
         size_t fd_idx = 0;
         uint64_t file_offset = 0;
+        // GUSLI: running byte offset per device id (like FILE advances per descriptor, not per list).
+        std::unordered_map<int, uint64_t> gusli_stripe_off;
         for (auto &iov_list : local_iovs) {
             std::vector<xferBenchIOV> remote_iov_list;
-            int devidx = 0;
             for (auto &iov : iov_list) {
                 if (xferBenchConfig::isObjStorageBackend()) {
                     std::optional<xferBenchIOV> basic_desc;
@@ -1126,11 +1135,24 @@ xferBenchNixlWorker::exchangeIOV(const std::vector<std::vector<xferBenchIOV>> &l
                         remote_iov_list.push_back(basic_desc.value());
                     }
                 } else if (XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend) {
+                    // createTransferDescLists() expands each registered IOV into count*batch_size
+                    // descriptors; they all carry the same iov.devId. Map by id, not by position.
+                    auto git = std::find_if(gusli_devices.begin(), gusli_devices.end(),
+                                            [&](const GusliDeviceConfig &d) {
+                                                return d.device_id == iov.devId;
+                                            });
+                    if (git == gusli_devices.end()) {
+                        std::cerr << "GUSLI exchangeIOV: unknown devId " << iov.devId
+                                  << " (expected a device_list id)" << std::endl;
+                        std::exit(EXIT_FAILURE);
+                    }
+                    uint64_t &stripe = gusli_stripe_off[iov.devId];
                     xferBenchIOV iov_remote(iov);
-                    iov_remote.addr = gusli_devices[devidx++].dev_offset + file_offset;
+                    iov_remote.addr = git->dev_offset + stripe;
                     iov_remote.len = block_size;
                     iov_remote.devId = iov.devId;
                     remote_iov_list.push_back(iov_remote);
+                    stripe += block_size;
                 } else {
                     xferBenchIOV iov_remote(iov);
                     iov_remote.addr = file_offset;
@@ -1145,9 +1167,6 @@ xferBenchNixlWorker::exchangeIOV(const std::vector<std::vector<xferBenchIOV>> &l
                 }
             }
             res.push_back(remote_iov_list);
-            if (XFERBENCH_BACKEND_GUSLI == xferBenchConfig::backend) {
-                file_offset += block_size;
-            }
         }
     } else {
         for (const auto &local_iov : local_iovs) {

@@ -77,6 +77,11 @@ class NIXLBench:
         # Additional nixlbench arguments
         large_blk_iter_ftr=16,
         recreate_xfer=False,
+        gusli_client_name="NIXLBench",
+        gusli_max_simultaneous_requests=32,
+        gusli_config_file="",
+        gusli_device_security="",
+        gusli_device_byte_offsets="",
     ):
         """
         Initialize a NIXLBench instance with benchmark configuration.
@@ -178,6 +183,11 @@ class NIXLBench:
         self.obj_req_checksum = obj_req_checksum
         self.large_blk_iter_ftr = large_blk_iter_ftr
         self.recreate_xfer = recreate_xfer
+        self.gusli_client_name = gusli_client_name
+        self.gusli_max_simultaneous_requests = gusli_max_simultaneous_requests
+        self.gusli_config_file = gusli_config_file
+        self.gusli_device_security = gusli_device_security
+        self.gusli_device_byte_offsets = gusli_device_byte_offsets
         self._override_defaults()
 
     def set_io_size(self, io_size: int):
@@ -245,6 +255,9 @@ class NIXLBench:
             self._configure_posix(source, destination)
         elif backend_lower in ["ucx", "gpunetio", "mooncake"]:
             self._configure_ucx(backend_lower, source, destination)
+        elif backend_lower == "gusli":
+            self._configure_ucx(backend_lower, source, destination)
+            self.storage_enable_direct = True
         elif backend_lower == "obj":
             self._configure_obj(source, destination)
         else:
@@ -273,6 +286,13 @@ class NIXLBench:
 
     def configure_buffer_size(self):
         self.total_buffer_size = self.max_batch_size * self.max_block_size
+
+    @staticmethod
+    def _nixlbench_argv_flags(name: str, value):
+        """gflags-style argv fragments for nixlbench (bool as --flag=true|false)."""
+        if isinstance(value, bool):
+            return [f"--{name}={'true' if value else 'false'}"]
+        return [f"--{name}", str(value)]
 
     def _override_defaults(self):
         """
@@ -339,6 +359,11 @@ class NIXLBench:
             # Additional nixlbench parameters
             "large_blk_iter_ftr": self.large_blk_iter_ftr,
             "recreate_xfer": self.recreate_xfer,
+            "gusli_client_name": self.gusli_client_name,
+            "gusli_max_simultaneous_requests": self.gusli_max_simultaneous_requests,
+            "gusli_config_file": self.gusli_config_file,
+            "gusli_device_security": self.gusli_device_security,
+            "gusli_device_byte_offsets": self.gusli_device_byte_offsets,
         }
 
     @staticmethod
@@ -400,6 +425,11 @@ class NIXLBench:
             # Additional nixlbench defaults
             "large_blk_iter_ftr": 16,
             "recreate_xfer": False,
+            "gusli_client_name": "NIXLBench",
+            "gusli_max_simultaneous_requests": 32,
+            "gusli_config_file": "",
+            "gusli_device_security": "",
+            "gusli_device_byte_offsets": "",
         }
 
     def plan(self, format: str = "text"):
@@ -437,7 +467,10 @@ class NIXLBench:
         else:  # for text format, exclude defaults to keep command concise
             for name, value in params.items():
                 if should_include(name, value):
-                    command_parts.append(f"--{name} {value}")
+                    bits = NIXLBench._nixlbench_argv_flags(name, value)
+                    command_parts.append(
+                        bits[0] if len(bits) == 1 else f"{bits[0]} {bits[1]}"
+                    )
 
             command = " \\\n    ".join(command_parts)
             return command
@@ -467,6 +500,5 @@ class NIXLBench:
         params = self._params()
         for name, value in params.items():
             if should_include(name, value):
-                command_parts.append(f"--{name}")
-                command_parts.append(f"{value}")
+                command_parts.extend(NIXLBench._nixlbench_argv_flags(name, value))
         return subprocess.run(command_parts, capture_output=False, env=env)

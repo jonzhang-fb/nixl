@@ -72,7 +72,7 @@ def nixl_bench_args(func):
     func = click.option(
         "--backend",
         type=str,
-        help="Communication backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ] (default: UCX)",
+        help="Communication backend [UCX, GDS, GDS_MT, POSIX, GPUNETIO, Mooncake, HF3FS, OBJ, GUSLI] (default: UCX)",
     )(func)
     func = click.option(
         "--worker_type",
@@ -278,6 +278,31 @@ def nixl_bench_args(func):
         "--obj_ca_bundle",
         type=str,
         help="Path to CA bundle for S3 backend (only used with OBJ backend)",
+    )(func)
+    func = click.option(
+        "--gusli_client_name",
+        type=str,
+        help="Client name for GUSLI backend (only used with GUSLI)",
+    )(func)
+    func = click.option(
+        "--gusli_max_simultaneous_requests",
+        type=int,
+        help="Max simultaneous requests for GUSLI (only used with GUSLI)",
+    )(func)
+    func = click.option(
+        "--gusli_config_file",
+        type=str,
+        help="GUSLI device config file body (only used with GUSLI; often multiline)",
+    )(func)
+    func = click.option(
+        "--gusli_device_security",
+        type=str,
+        help="Comma-separated security flags per GUSLI device (only used with GUSLI)",
+    )(func)
+    func = click.option(
+        "--gusli_device_byte_offsets",
+        type=str,
+        help="Comma-separated byte offsets per GUSLI device (only used with GUSLI)",
     )(func)
     return func
 
